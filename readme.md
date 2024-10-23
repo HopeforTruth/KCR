@@ -1,6 +1,6 @@
 # KCR(Multivariate Time Series Anomaly Detection with K-distance Calibrated Reconstruction)
 ## Code Description
-There are 11 files/folders in the source.
+There are 11 files/folders in the source.(file named ".gitkeep" indicates empty Folder)
 - ablation models: The models in ablation experiments are stored in this foldr
 - dataset: The original dataset folder.
 - hyper parameters: We save the parameters in this folder.
