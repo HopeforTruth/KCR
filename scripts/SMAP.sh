@@ -1,0 +1,1 @@
+python main.py --dataset SMAP --number A-1

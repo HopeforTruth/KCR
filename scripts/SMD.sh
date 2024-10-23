@@ -1,0 +1,1 @@
+python main.py --dataset SMD --number 1-1
