@@ -1,0 +1,186 @@
+# KCR核心计算伪代码
+
+## 1. 数据预处理和窗口化
+
+```
+函数 preprocess_data(dataset, window_size):
+    // 加载训练和测试数据
+    train_data = load_train_data(dataset)
+    test_data = load_test_data(dataset)
+    test_labels = load_test_labels(dataset)
+    
+    // 对数据进行窗口化处理
+    train_windows = convert_to_windows(train_data, window_size)
+    test_windows = convert_to_windows(test_data, window_size)
+    
+    返回 train_windows, test_windows, test_labels
+```
+
+## 2. 多尺度重构神经网络
+
+```
+类 MultiscaleReconBlock:
+    构造函数(in_channels, pro_channels):
+        // 四个并行分支
+        branch1 = Conv1x1(in_channels, pro_channels)
+        branch2 = Sequential(Conv1x1(in_channels, pro_channels), Conv3x3(pro_channels, pro_channels))
+        branch3 = Sequential(Conv1x1(in_channels, pro_channels), Conv5x5(pro_channels, pro_channels))
+        branch4 = Sequential(MaxPool3x3(in_channels), Conv1x1(in_channels, pro_channels))
+        
+        output_layer = Conv1x1(4 * pro_channels, in_channels)
+
+    前向传播(x):
+        out1 = branch1(x)
+        out2 = branch2(x)
+        out3 = branch3(x)
+        out4 = branch4(x)
+        
+        // 连接所有分支输出
+        outputs = concatenate([out1, out2, out3, out4], axis=1)
+        outputs = output_layer(outputs)
+        outputs = outputs + x  // 残差连接
+        
+        返回 outputs
+
+类 MultiScaleReconNet:
+    构造函数(config):
+        in_out_channels = config.n_features
+        pro_channels = config.pro_features
+        window_size = config.window_size
+        period_length = config.period_length
+        
+        // 两个多尺度重构块
+        multi_scale_conv_x1 = MultiscaleReconBlock(in_out_channels, pro_channels)
+        multi_scale_conv_x2 = MultiscaleReconBlock(in_out_channels, pro_channels)
+
+    前向传播(x):
+        batch_size = x.shape[0]
+        
+        // 1D转2D: 重塑输入以适应周期性结构
+        x = reshape_to_2d(x, period_length)
+        
+        // 交换维度以适应卷积操作
+        x = permute(x, [0, 3, 1, 2])  // (batch, features, period, height)
+        
+        // 多尺度重构
+        reconstruct = multi_scale_conv_x1(x)
+        reconstruct = multi_scale_conv_x2(reconstruct)
+        
+        // 恢复原始维度顺序
+        reconstruct = permute(reconstruct, [0, 1, 2, 3])
+        
+        // 2D转1D: 恢复为序列格式
+        reconstruct = reshape_to_1d(reconstruct, window_size)
+        
+        返回 reconstruct
+```
+
+## 3. K距离校准损失函数
+
+```
+函数 K_distance(tensor1, tensor2, p, k):
+    // 对最后一个时间点应用k倍权重
+    IF k > 1:
+        tensor1[:, -1, :] = tensor1[:, -1, :] * k
+        tensor2[:, -1, :] = tensor2[:, -1, :] * k
+    
+    // 转置以适应距离计算
+    tensor1 = permute(tensor1, [0, 2, 1])
+    tensor2 = permute(tensor2, [0, 2, 1])
+    
+    // 计算逐对距离
+    distances = pairwise_distance(tensor1, tensor2, p)
+    
+    返回 distances
+
+类 KLoss:
+    构造函数(k):
+        k_times = k
+
+    前向传播(inputs, outputs, targets):
+        // 当targets为1时，理想输出等于当前输出（距离为0）
+        targets = expand_dims(targets, axis=-1)
+        ideal_outputs = where(targets == 0, inputs, outputs)
+        
+        // 计算K距离
+        errors = K_distance(outputs, ideal_outputs, p=1, k=k_times)
+        loss = mean(errors)
+        
+        返回 loss
+```
+
+## 4. 异常检测和评分
+
+```
+函数 detect_anomalies(model, test_data, test_labels, config):
+    // 前向传播获得重构数据
+    reconstructions = model(test_data)
+    
+    // 计算重构误差
+    scores = K_distance(test_data, reconstructions, config.pow, config.k_times)
+    
+    // 后处理分数
+    half_window = config.window_size / 2
+    zeros = zeros_like(scores[:half_window])
+    scores = concatenate((scores[half_window:], zeros), axis=0)
+    
+    // 特征选择（可选）
+    IF config.feature_selection:
+        important_features = select_important_features(config.dataset, config.number)
+    ELSE:
+        important_features = range(n_features)
+    
+    // 集成预测（可选）
+    IF config.integrate_prediction:
+        pred_labels = zeros_like(scores)
+        FOR i in important_features:
+            pred_labels[:, i] = label_with_anomaly_proportion(scores[:, i], anomaly_proportion)
+        pred_labels = sum(pred_labels, axis=1)
+        pred_labels = where(pred_labels >= len(important_features), 1, 0)
+    ELSE:
+        // 平均重要特征的分数
+        temp_scores = scores[:, important_features]
+        averaged_scores = average(temp_scores, axis=1)
+        pred_labels = label_with_anomaly_proportion(averaged_scores, anomaly_proportion)
+    
+    返回 pred_labels, scores
+```
+
+## 5. 完整训练和测试流程
+
+```
+函数 main_training_and_testing(config):
+    // 数据预处理
+    train_data, test_data, test_labels = preprocess_data(config.dataset, config.window_size)
+    
+    // 模型初始化
+    model = MultiScaleReconNet(config)
+    optimizer = Adam(model.parameters(), lr=config.learning_rate)
+    
+    IF config.calibrated_reconstruct AND config.kDistance:
+        criterion = KLoss(config.k_times)
+    ELSE:
+        criterion = ReconLoss(config.k_times)
+    
+    // 训练循环
+    FOR epoch in range(config.epochs):
+        FOR batch in train_data_batches:
+            inputs, targets = batch
+            
+            // 前向传播
+            outputs = model(inputs)
+            loss = criterion(inputs, outputs, targets)
+            
+            // 反向传播和优化
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    
+    // 测试
+    predictions, scores = detect_anomalies(model, test_data, test_labels, config)
+    
+    // 评估性能
+    performance = evaluate_performance(test_labels, predictions)
+    
+    返回 performance
+```
